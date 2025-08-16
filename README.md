@@ -43,8 +43,26 @@ npm install -g lightningcss-cli
 2. Download the script:
 
 ```bash
-curl -O https://raw.githubusercontent.com/yourusername/strike/main/strike.sh
+curl -O https://raw.githubusercontent.com/roelvangils/strike/main/strike.sh
 chmod +x strike.sh
+```
+
+3. (Optional) Make `strike` available globally:
+
+```bash
+# Create a symlink in /usr/local/bin (or any directory in your PATH)
+sudo ln -s $(pwd)/strike.sh /usr/local/bin/strike
+
+# Now you can use 'strike' from anywhere:
+cd ~/my-css-project
+strike
+```
+
+Alternatively, you can add an alias to your shell configuration:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+alias strike='/path/to/strike.sh'
 ```
 
 ## Usage
@@ -53,16 +71,16 @@ chmod +x strike.sh
 
 ```bash
 # Watch and compile with minification (default)
-./strike.sh
+strike
 
 # Compile once and exit
-./strike.sh --no-watch
+strike --no-watch
 
 # Include source maps for debugging
-./strike.sh -s
+strike -s
 
 # Development mode (no minification + source maps)
-./strike.sh --no-minify -s
+strike --no-minify -s
 ```
 
 ### Command Options
