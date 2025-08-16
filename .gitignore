@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Compiled CSS output (for testing)
+*.compiled.css
+
+# Node modules (if any)
+node_modules/
+
+# Editor directories and files
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
