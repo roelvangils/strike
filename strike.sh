@@ -225,22 +225,41 @@ compile_css() {
     fi
     COMPILING=true
 
+    local changed_file="$1"  # Optional: specific file that changed
     local main_file=""
     local base_name=""
     local output_file=""
 
-    # Find the main CSS file (not a partial, not already compiled)
-    for css_file in "$WATCH_DIR"/*.css; do
-        [ ! -f "$css_file" ] && continue
-
-        base_name=$(basename "$css_file")
-
-        # Skip partials (start with _) and compiled files
-        if [[ ! "$base_name" =~ ^_ ]] && [[ ! "$base_name" =~ \.compiled\.css$ ]]; then
-            main_file="$css_file"
-            break
+    # If a specific file was provided, use it (unless it's a partial)
+    if [ -n "$changed_file" ]; then
+        # Convert to full path if it's just a filename
+        if [[ "$changed_file" != /* ]]; then
+            changed_file="$WATCH_DIR/$changed_file"
         fi
-    done
+
+        base_name=$(basename "$changed_file")
+
+        # If it's a partial, we need to compile all main CSS files
+        # If it's not a partial and not compiled, use it directly
+        if [[ ! "$base_name" =~ ^_ ]] && [[ ! "$base_name" =~ \.compiled\.css$ ]]; then
+            main_file="$changed_file"
+        fi
+    fi
+
+    # If no specific file or it was a partial, find the first main CSS file
+    if [ -z "$main_file" ]; then
+        for css_file in "$WATCH_DIR"/*.css; do
+            [ ! -f "$css_file" ] && continue
+
+            base_name=$(basename "$css_file")
+
+            # Skip partials (start with _) and compiled files
+            if [[ ! "$base_name" =~ ^_ ]] && [[ ! "$base_name" =~ \.compiled\.css$ ]]; then
+                main_file="$css_file"
+                break
+            fi
+        done
+    fi
 
     # Check if we found a main file
     if [ -z "$main_file" ]; then
@@ -426,7 +445,7 @@ EOF
             # Get current time
             current_time=$(date +"%H:%M")
             echo -e "${WHITE}$file${GRAY} changed (${current_time})${RESET}"
-            compile_css
+            compile_css "$file"
         done
         done
     fi
@@ -449,7 +468,7 @@ if (! command -v watchman &>/dev/null || [ "$WATCHMAN_FAILED" = true ]) && comma
             # Get current time
             current_time=$(date +"%H:%M")
             echo -e "${WHITE}$(basename "$path")${GRAY} changed (${current_time})${RESET}"
-            compile_css
+            compile_css "$path"
         fi
     done
 
@@ -471,7 +490,7 @@ elif (! command -v watchman &>/dev/null || [ "$WATCHMAN_FAILED" = true ]) && com
             # Get current time
             current_time=$(date +"%H:%M")
             echo -e "${WHITE}$file${GRAY} changed (${current_time})${RESET}"
-            compile_css
+            compile_css "$file"
         fi
     done
 
@@ -505,8 +524,6 @@ else
 
     # Poll for changes every second
     while true; do
-        changed=false
-
         for file in "$WATCH_DIR"/*.css "$WATCH_DIR"/_*.css; do
             [ -f "$file" ] || continue
 
@@ -523,18 +540,14 @@ else
 
             # Check if file changed
             if [ "${file_times[$file]}" != "$current_time" ]; then
-                changed=true
                 file_times["$file"]=$current_time
                 # Get current time
                 time_now=$(date +"%H:%M")
                 echo -e "${WHITE}$(basename "$file")${GRAY} changed (${time_now})${RESET}"
+                # Compile the specific file that changed
+                compile_css "$file"
             fi
         done
-
-        # Recompile if any file changed
-        if [ "$changed" = true ]; then
-            compile_css
-        fi
 
         # Wait before next check
         sleep 1
