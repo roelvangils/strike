@@ -7,9 +7,6 @@
 # Uses Lightning CSS (Rust-based) for maximum performance
 # ============================================================================
 
-# Track timing
-START_TIME=0
-
 # ANSI Color Codes
 GRAY='\033[0;90m'      # Gray for most output
 WHITE='\033[1;97m'     # Bright white for filenames
@@ -18,11 +15,15 @@ RESET='\033[0m'        # Reset color
 # ----------------------------------------------------------------------------
 # Configuration & Defaults
 # ----------------------------------------------------------------------------
+VERSION="1.0.0"       # Version number
 WATCH_MODE=true       # Watch for file changes by default
 SOURCE_MAPS=false     # No source maps by default (production-optimized)
 MINIFY=true           # Minify output by default
 SHOW_HELP=false       # Show help text
+DEBUG=false           # Debug mode off by default
 WATCH_DIR="."         # Always watch current directory
+COMPILING=false       # Mutex to prevent concurrent compilations
+BROWSER_TARGETS="${BROWSER_TARGETS:-">= 0.25%"}"  # Browser targets (configurable via env var)
 
 # ----------------------------------------------------------------------------
 # Parse Command Line Arguments
@@ -32,6 +33,10 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             SHOW_HELP=true
             shift
+            ;;
+        -v|--version)
+            echo "swatch v$VERSION"
+            exit 0
             ;;
         -w|--watch)
             WATCH_MODE=true
@@ -53,8 +58,12 @@ while [[ $# -gt 0 ]]; do
             MINIFY=false
             shift
             ;;
+        -d|--debug)
+            DEBUG=true
+            shift
+            ;;
         *)
-            echo "Unknown option: $1"
+            echo -e "${GRAY}Error: Unknown option: $1${RESET}" >&2
             echo "Use --help for usage information"
             exit 1
             ;;
@@ -73,11 +82,13 @@ USAGE:
 
 OPTIONS:
     -h, --help        Show this help message
+    -v, --version     Show version information
     -w, --watch       Watch for file changes (default: on)
     --no-watch        Compile once and exit
     -s, --sourcemap   Include inline source maps (for debugging)
     -m, --minify      Minify the output (default: on)
     --no-minify       Don't minify (keep readable)
+    -d, --debug       Show debug information (commands being run)
 
 EXAMPLES:
     swatch                    # Default: watch + minify, no source maps
@@ -159,7 +170,7 @@ if [ "$WATCH_MODE" = true ] && [ "$HAS_GUM" = true ]; then
 
     # Use gum for interactive selection
     current_dir_name=$(basename "$CURRENT_DIR")
-    selected=$(printf "%s\n" "${display_names[@]}" | \
+    if selected=$(printf "%s\n" "${display_names[@]}" | \
         gum choose \
         --cursor.foreground="#FFA500" \
         --selected.foreground="#FFA500" \
@@ -167,21 +178,31 @@ if [ "$WATCH_MODE" = true ] && [ "$HAS_GUM" = true ]; then
         --cursor="> " \
         --header="Press Enter to use the current directory" \
         --limit=1 \
-        --selected="$current_dir_name (*)")
+        --selected="$current_dir_name (*)"); then
 
-    # Map selection back to full path
-    if [ -n "$selected" ]; then
-        # Remove (*) suffix if present
-        clean_selected=${selected% (*)}
+        # Map selection back to full path
+        if [ -n "$selected" ]; then
+            # Remove (*) suffix if present
+            clean_selected=${selected% (*)}
 
-        # Find matching path
-        for i in "${!display_names[@]}"; do
-            clean_display=${display_names[$i]% (*)}
-            if [ "$clean_display" = "$clean_selected" ]; then
-                OUTPUT_DIR="${full_paths[$i]}"
-                break
+            # Find matching path
+            for i in "${!display_names[@]}"; do
+                clean_display=${display_names[$i]% (*)}
+                if [ "$clean_display" = "$clean_selected" ]; then
+                    OUTPUT_DIR="${full_paths[$i]}"
+                    break
+                fi
+            done
+
+            # Validate that we found a match
+            if [ -z "$OUTPUT_DIR" ]; then
+                echo -e "${GRAY}Warning: Selection not found, using current directory${RESET}"
+                OUTPUT_DIR="$CURRENT_DIR"
             fi
-        done
+        fi
+    else
+        # User cancelled (Ctrl+C), use current directory
+        echo -e "${GRAY}Selection cancelled, using current directory${RESET}"
     fi
 fi
 
@@ -198,6 +219,12 @@ echo ""
 # Core Compilation Function
 # ----------------------------------------------------------------------------
 compile_css() {
+    # Prevent concurrent compilations
+    if [ "$COMPILING" = true ]; then
+        return 0
+    fi
+    COMPILING=true
+
     local main_file=""
     local base_name=""
     local output_file=""
@@ -219,6 +246,7 @@ compile_css() {
     if [ -z "$main_file" ]; then
         echo "No main CSS file found"
         echo "Looking for: *.css (not _*.css or *.compiled.css)"
+        COMPILING=false
         return 1
     fi
 
@@ -227,32 +255,37 @@ compile_css() {
     output_file="$OUTPUT_DIR/${base_name}.compiled.css"
 
     # Build Lightning CSS command with options
-    local cmd="lightningcss"
+    local cmd_args=()
 
     # Always bundle (inline @imports)
-    cmd="$cmd --bundle"
+    cmd_args+=("--bundle")
 
     # Add minification if enabled
     if [ "$MINIFY" = true ]; then
-        cmd="$cmd --minify"
+        cmd_args+=("--minify")
     fi
 
     # Add source maps if enabled (inline for simplicity)
     if [ "$SOURCE_MAPS" = true ]; then
-        cmd="$cmd --sourcemap=inline"
+        cmd_args+=("--sourcemap=inline")
     fi
 
-    # Browser targets (support browsers with >0.25% market share)
-    cmd="$cmd --targets \">= 0.25%\""
+    # Browser targets (configurable via BROWSER_TARGETS environment variable)
+    cmd_args+=("--targets" "$BROWSER_TARGETS")
 
     # Add input and output files
-    cmd="$cmd \"$main_file\" -o \"$output_file\""
+    cmd_args+=("$main_file" "-o" "$output_file")
+
+    # Show debug output if enabled
+    if [ "$DEBUG" = true ]; then
+        echo -e "${GRAY}Debug: Running command: lightningcss ${cmd_args[*]}${RESET}"
+    fi
 
     # Execute compilation with timing
     # Use bash's time and TIMEFORMAT to get milliseconds directly
     TIMEFORMAT='%3R'
     local timing_output
-    { timing_output=$( { time eval "$cmd" 1>/dev/null 2>&1; } 2>&1 ); }
+    { timing_output=$( { time lightningcss "${cmd_args[@]}" 1>/dev/null 2>&1; } 2>&1 ); }
     local result=$?
 
     if [ $result -eq 0 ]; then
@@ -278,14 +311,29 @@ compile_css() {
                 echo -e "  ${GRAY}↘ ${WHITE}$(basename "$main_file")${GRAY} → ${WHITE}$(basename "$output_file")${RESET}"
             fi
         fi
+        COMPILING=false
         return 0
     else
         echo "Compilation failed"
         # Re-run with error output for debugging
-        eval "$cmd"
+        lightningcss "${cmd_args[@]}"
+        COMPILING=false
         return 1
     fi
 }
+
+# ----------------------------------------------------------------------------
+# Output Directory Validation
+# ----------------------------------------------------------------------------
+if [ ! -d "$OUTPUT_DIR" ]; then
+    echo -e "${GRAY}Error: Output directory does not exist: $OUTPUT_DIR${RESET}" >&2
+    exit 1
+fi
+
+if [ ! -w "$OUTPUT_DIR" ]; then
+    echo -e "${GRAY}Error: Output directory is not writable: $OUTPUT_DIR${RESET}" >&2
+    exit 1
+fi
 
 # ----------------------------------------------------------------------------
 # Show Current Configuration
@@ -307,6 +355,22 @@ if [ "$WATCH_MODE" = false ]; then
 fi
 
 # ----------------------------------------------------------------------------
+# Signal Handling & Cleanup
+# ----------------------------------------------------------------------------
+cleanup() {
+    echo ''
+    echo -e "${GRAY}Stopping...${RESET}"
+    # Clean up watchman watch if it was initialized
+    if command -v watchman &>/dev/null; then
+        watchman watch-del "$WATCH_DIR" >/dev/null 2>&1
+    fi
+    exit 0
+}
+
+# Set up signal handlers for all watch modes
+trap cleanup INT TERM HUP QUIT
+
+# ----------------------------------------------------------------------------
 # File Watching Setup
 # ----------------------------------------------------------------------------
 echo ""
@@ -323,37 +387,54 @@ if command -v watchman &>/dev/null; then
     echo -e "${GRAY}• Press Ctrl+C to stop watching${RESET}"
     echo ""
 
-    # Initialize Watchman on current directory (silence all output)
-    watchman watch "$WATCH_DIR" >/dev/null 2>&1
+    # Initialize Watchman on current directory with error handling
+    if ! watchman watch "$WATCH_DIR" >/dev/null 2>&1; then
+        echo -e "${GRAY}Warning: Watchman failed to watch directory${RESET}"
+        echo -e "${GRAY}Falling back to alternative file watcher...${RESET}"
+        # Set flag to skip watchman and try next watcher
+        WATCHMAN_FAILED=true
+    else
+        WATCHMAN_FAILED=false
+    fi
 
-    # Set up optimized subscription for CSS files
-    # Settle time of 20ms for near-instant response (default is 200ms)
-    watchman -j <<-EOF > /dev/null 2>&1
-        ["subscribe", "$WATCH_DIR", "css-watch", {
-            "expression": ["allof",
-                ["match", "*.css"],
-                ["not", ["match", "*.compiled.css"]],
-                ["not", ["match", "*.map"]]
-            ],
-            "fields": ["name"],
-            "settle": 20
-        }]
+    # Only proceed with watchman if initialization succeeded
+    if [ "$WATCHMAN_FAILED" = false ]; then
+        # Set up optimized subscription for CSS files
+        # Settle time of 20ms for near-instant response (default is 200ms)
+        if ! watchman -j <<-EOF > /dev/null 2>&1
+            ["subscribe", "$WATCH_DIR", "css-watch", {
+                "expression": ["allof",
+                    ["match", "*.css"],
+                    ["not", ["match", "*.compiled.css"]],
+                    ["not", ["match", "*.map"]]
+                ],
+                "fields": ["name"],
+                "settle": 20
+            }]
 EOF
+        then
+            echo -e "${GRAY}Warning: Watchman subscription failed${RESET}"
+            echo -e "${GRAY}Falling back to alternative file watcher...${RESET}"
+            WATCHMAN_FAILED=true
+        fi
+    fi
 
-    # Watch for changes using watchman-wait
-    # Process one event at a time for fastest response
-    trap "echo ''; echo -e '${GRAY}Stopping...${RESET}'; exit 0" INT TERM
-    while true; do
+    # Watch for changes using watchman-wait if setup succeeded
+    if [ "$WATCHMAN_FAILED" = false ]; then
+        while true; do
         watchman-wait "$WATCH_DIR" --max-events=1 --fields name -p '*.css' 2>/dev/null | while read -r file; do
             # Get current time
             current_time=$(date +"%H:%M")
             echo -e "${WHITE}$file${GRAY} changed (${current_time})${RESET}"
             compile_css
         done
-    done
+        done
+    fi
+fi
 
 # Option 2: fswatch (native macOS, good performance)
-elif command -v fswatch &>/dev/null; then
+# Only use if watchman is not available or failed
+if (! command -v watchman &>/dev/null || [ "$WATCHMAN_FAILED" = true ]) && command -v fswatch &>/dev/null; then
     echo -e "${GRAY}• Using fswatch for file watching${RESET}"
     echo -e "${GRAY}• Press Ctrl+C to stop watching${RESET}"
     echo ""
@@ -373,7 +454,8 @@ elif command -v fswatch &>/dev/null; then
     done
 
 # Option 3: inotifywait (Linux, good performance)
-elif command -v inotifywait &>/dev/null; then
+# Only use if watchman and fswatch are not available or failed
+elif (! command -v watchman &>/dev/null || [ "$WATCHMAN_FAILED" = true ]) && command -v inotifywait &>/dev/null; then
     echo -e "${GRAY}• Using inotifywait for file watching${RESET}"
     echo -e "${GRAY}• Press Ctrl+C to stop watching${RESET}"
     echo ""
