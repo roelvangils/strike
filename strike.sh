@@ -225,7 +225,16 @@ compile_css() {
     fi
     COMPILING=true
 
-    local changed_file="$1"  # Optional: specific file that changed
+    local is_initial=false
+    local changed_file=""
+
+    # Handle parameters: first param could be filename or "initial" flag
+    if [ "$1" = "initial" ]; then
+        is_initial=true
+    else
+        changed_file="$1"  # Optional: specific file that changed
+    fi
+
     local main_file=""
     local base_name=""
     local output_file=""
@@ -317,14 +326,14 @@ compile_css() {
             ms=$((10#$ms))
             local total_ms=$((secs * 1000 + ms))
             # Compile output during initial run
-            if [ "$1" = "initial" ]; then
+            if [ "$is_initial" = true ]; then
                 echo -e "${GRAY}Recompiling ${WHITE}$(basename "$main_file")${GRAY} → ${WHITE}$(basename "$output_file")${GRAY} (${total_ms}ms)${RESET}"
             else
                 # File change notification was already shown, just show compile
                 echo -e "  ${GRAY}↘ ${WHITE}$(basename "$main_file")${GRAY} → ${WHITE}$(basename "$output_file")${GRAY} (${total_ms}ms)${RESET}"
             fi
         else
-            if [ "$1" = "initial" ]; then
+            if [ "$is_initial" = true ]; then
                 echo -e "${GRAY}Recompiling ${WHITE}$(basename "$main_file")${GRAY} → ${WHITE}$(basename "$output_file")${RESET}"
             else
                 echo -e "  ${GRAY}↘ ${WHITE}$(basename "$main_file")${GRAY} → ${WHITE}$(basename "$output_file")${RESET}"
