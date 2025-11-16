@@ -96,12 +96,13 @@ EXAMPLES:
     swatch -s                 # Include source maps for debugging
     swatch --no-minify -s     # Debug mode: readable + source maps
 
-OUTPUT:
-    Automatically detects main CSS file (non-partial)
-    Outputs to: [filename].compiled.css
+INPUT/OUTPUT:
+    Compiles source files matching: src.*.css
+    Example: src.theverge.com.css → theverge.com.css
 
 NOTES:
-    - Partials (files starting with _) are imported but not compiled directly
+    - Only processes files matching the src.*.css pattern
+    - Partials (files starting with _) can be imported but aren't compiled directly
     - Source maps are embedded inline when enabled (-s flag)
     - Default mode is optimized for production (minified, no maps)
     - Uses Watchman for fastest possible file watching (if available)
@@ -134,6 +135,7 @@ fi
 # UI Header
 # ----------------------------------------------------------------------------
 echo -e "${GRAY}⚡ Lightning CSS + Watchman = 🚀${RESET}"
+echo -e "${GRAY}Only processes files matching pattern: src.*.css${RESET}"
 echo ""
 
 # ----------------------------------------------------------------------------
@@ -228,18 +230,24 @@ compile_css() {
     local is_initial=false
     local changed_file=""
 
-    # Handle parameters: first param could be filename or "initial" flag
-    if [ "$1" = "initial" ]; then
+    # Handle parameters:
+    # - compile_css "file.css" initial  -> compile specific file with initial display
+    # - compile_css "file.css"          -> compile specific file with change display
+    # - compile_css initial             -> find first file with initial display (legacy)
+    if [ "$2" = "initial" ]; then
+        is_initial=true
+        changed_file="$1"
+    elif [ "$1" = "initial" ]; then
         is_initial=true
     else
-        changed_file="$1"  # Optional: specific file that changed
+        changed_file="$1"
     fi
 
     local main_file=""
     local base_name=""
     local output_file=""
 
-    # If a specific file was provided, use it (unless it's a partial)
+    # If a specific file was provided, use it (only if it matches src.*.css pattern)
     if [ -n "$changed_file" ]; then
         # Convert to full path if it's just a filename
         if [[ "$changed_file" != /* ]]; then
@@ -248,39 +256,40 @@ compile_css() {
 
         base_name=$(basename "$changed_file")
 
-        # If it's a partial, we need to compile all main CSS files
-        # If it's not a partial and not compiled, use it directly
-        if [[ ! "$base_name" =~ ^_ ]] && [[ ! "$base_name" =~ \.compiled\.css$ ]]; then
+        # Only process files matching src.*.css pattern (and not partials)
+        if [[ "$base_name" =~ ^src\..*\.css$ ]] && [[ ! "$base_name" =~ ^_ ]]; then
             main_file="$changed_file"
         fi
     fi
 
-    # If no specific file or it was a partial, find the first main CSS file
+    # If no specific file or it didn't match pattern, find the first source file
     if [ -z "$main_file" ]; then
-        for css_file in "$WATCH_DIR"/*.css; do
+        for css_file in "$WATCH_DIR"/src.*.css; do
             [ ! -f "$css_file" ] && continue
 
             base_name=$(basename "$css_file")
 
-            # Skip partials (start with _) and compiled files
-            if [[ ! "$base_name" =~ ^_ ]] && [[ ! "$base_name" =~ \.compiled\.css$ ]]; then
+            # Skip partials (start with _)
+            if [[ ! "$base_name" =~ ^_ ]]; then
                 main_file="$css_file"
                 break
             fi
         done
     fi
 
-    # Check if we found a main file
+    # Check if we found a source file
     if [ -z "$main_file" ]; then
-        echo "No main CSS file found"
-        echo "Looking for: *.css (not _*.css or *.compiled.css)"
+        echo "No source CSS file found"
+        echo "Looking for: src.*.css (not _*.css)"
         COMPILING=false
         return 1
     fi
 
-    # Prepare output filename
-    base_name=$(basename "$main_file" .css)
-    output_file="$OUTPUT_DIR/${base_name}.compiled.css"
+    # Prepare output filename: src.example.com.css → example.com.css
+    base_name=$(basename "$main_file")
+    # Remove 'src.' prefix
+    output_name="${base_name#src.}"           # Remove src. prefix
+    output_file="$OUTPUT_DIR/${output_name}"
 
     # Build Lightning CSS command with options
     local cmd_args=()
@@ -373,9 +382,18 @@ echo -e "${GRAY}$([ "$WATCH_MODE" = true ] && echo "✓" || echo "𐄂") Watch M
 echo ""
 
 # ----------------------------------------------------------------------------
-# Initial Compilation
+# Initial Compilation - Compile all source CSS files
 # ----------------------------------------------------------------------------
-compile_css initial
+for css_file in "$WATCH_DIR"/src.*.css; do
+    [ ! -f "$css_file" ] && continue
+
+    base_name=$(basename "$css_file")
+
+    # Skip partials (start with _)
+    if [[ ! "$base_name" =~ ^_ ]]; then
+        compile_css "$css_file" initial
+    fi
+done
 
 # Exit if not in watch mode
 if [ "$WATCH_MODE" = false ]; then
@@ -427,15 +445,11 @@ if command -v watchman &>/dev/null; then
 
     # Only proceed with watchman if initialization succeeded
     if [ "$WATCHMAN_FAILED" = false ]; then
-        # Set up optimized subscription for CSS files
+        # Set up optimized subscription for source CSS files (src.*.css)
         # Settle time of 20ms for near-instant response (default is 200ms)
         if ! watchman -j <<-EOF > /dev/null 2>&1
             ["subscribe", "$WATCH_DIR", "css-watch", {
-                "expression": ["allof",
-                    ["match", "*.css"],
-                    ["not", ["match", "*.compiled.css"]],
-                    ["not", ["match", "*.map"]]
-                ],
+                "expression": ["match", "src.*.css"],
                 "fields": ["name"],
                 "settle": 20
             }]
@@ -450,7 +464,7 @@ EOF
     # Watch for changes using watchman-wait if setup succeeded
     if [ "$WATCHMAN_FAILED" = false ]; then
         while true; do
-        watchman-wait "$WATCH_DIR" --max-events=1 --fields name -p '*.css' 2>/dev/null | while read -r file; do
+        watchman-wait "$WATCH_DIR" --max-events=1 --fields name -p 'src.*.css' 2>/dev/null | while read -r file; do
             # Get current time
             current_time=$(date +"%H:%M")
             echo -e "${WHITE}$file${GRAY} changed (${current_time})${RESET}"
@@ -467,18 +481,15 @@ if (! command -v watchman &>/dev/null || [ "$WATCHMAN_FAILED" = true ]) && comma
     echo -e "${GRAY}• Press Ctrl+C to stop watching${RESET}"
     echo ""
 
-    # Watch CSS files, batch changes, exclude compiled files
+    # Watch source CSS files (src.*.css)
     fswatch \
-        --exclude '\.compiled\.css$' \
-        --exclude '\.map$' \
+        --include 'src\..*\.css$' \
         "$WATCH_DIR" 2>/dev/null | \
     while read -r path; do
-        if [[ "$path" == *.css ]]; then
-            # Get current time
-            current_time=$(date +"%H:%M")
-            echo -e "${WHITE}$(basename "$path")${GRAY} changed (${current_time})${RESET}"
-            compile_css "$path"
-        fi
+        # Get current time
+        current_time=$(date +"%H:%M")
+        echo -e "${WHITE}$(basename "$path")${GRAY} changed (${current_time})${RESET}"
+        compile_css "$path"
     done
 
 # Option 3: inotifywait (Linux, good performance)
@@ -489,13 +500,13 @@ elif (! command -v watchman &>/dev/null || [ "$WATCHMAN_FAILED" = true ]) && com
     echo ""
 
     while true; do
-        # Wait for CSS file changes
+        # Wait for source CSS file changes (src.*.css)
         file=$(inotifywait -q -e modify,create,delete,move \
-            --exclude '.*\.compiled\.css$|.*\.map$' \
+            --include 'src\..*\.css$' \
             --format '%f' \
             "$WATCH_DIR" 2>/dev/null)
 
-        if [[ "$file" == *.css ]]; then
+        if [[ -n "$file" ]]; then
             # Get current time
             current_time=$(date +"%H:%M")
             echo -e "${WHITE}$file${GRAY} changed (${current_time})${RESET}"
@@ -516,12 +527,9 @@ else
     # Track file modification times
     declare -A file_times
 
-    # Get initial state
-    for file in "$WATCH_DIR"/*.css "$WATCH_DIR"/_*.css; do
+    # Get initial state for source CSS files
+    for file in "$WATCH_DIR"/src.*.css; do
         [ -f "$file" ] || continue
-
-        # Skip compiled files
-        [[ "$file" =~ \.compiled\.css$ ]] && continue
 
         # Store modification time (portable across macOS and Linux)
         if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -533,11 +541,8 @@ else
 
     # Poll for changes every second
     while true; do
-        for file in "$WATCH_DIR"/*.css "$WATCH_DIR"/_*.css; do
+        for file in "$WATCH_DIR"/src.*.css; do
             [ -f "$file" ] || continue
-
-            # Skip compiled files
-            [[ "$file" =~ \.compiled\.css$ ]] && continue
 
             # Get current modification time
             current_time=""
