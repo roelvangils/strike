@@ -404,8 +404,11 @@ compile_css() {
     # Browser targets (configurable via BROWSER_TARGETS environment variable)
     cmd_args+=("--targets" "$BROWSER_TARGETS")
 
-    # Add input and output files
-    cmd_args+=("$main_file" "-o" "$output_file")
+    # Write to a temp file in the same directory, then atomically rename.
+    # Prevents readers (browser extensions, hot-reloaders, etc.) from seeing
+    # an empty file during the brief moment lightningcss has it open-for-write.
+    local output_tmp="${output_file}.tmp.$$.$RANDOM"
+    cmd_args+=("$main_file" "-o" "$output_tmp")
 
     # Show debug output if enabled
     if [ "$DEBUG" = true ]; then
@@ -420,6 +423,8 @@ compile_css() {
     local result=$?
 
     if [ $result -eq 0 ]; then
+        # Atomic publish: rename temp → final. Readers see old-or-new, never empty.
+        mv -f "$output_tmp" "$output_file"
         # Persist the bundle hash so future identical saves are skipped.
         if [ -n "$HASH_DIR" ]; then
             local hf_out
@@ -451,8 +456,13 @@ compile_css() {
         return 0
     else
         echo "Compilation failed"
-        # Re-run with error output for debugging
-        lightningcss "${cmd_args[@]}"
+        # Clean up the temp file so it doesn't accumulate
+        rm -f "$output_tmp"
+        # Re-run with error output for debugging (writing to final path now,
+        # since we've already failed — diagnostic output is what matters)
+        local debug_args=("${cmd_args[@]}")
+        debug_args[${#debug_args[@]}-1]="$output_file"
+        lightningcss "${debug_args[@]}"
         COMPILING=false
         return 1
     fi
@@ -461,22 +471,39 @@ compile_css() {
 # ----------------------------------------------------------------------------
 # Compile every source affected by a change.
 # - If the changed file is a src.*.css, compile only that one.
-# - Otherwise (a partial or imported helper), iterate all sources; the bundle
-#   hash check inside compile_css will fast-path the ones that don't depend
-#   on the changed file.
+# - If it's an imported partial, recompile only the sources that actually
+#   import it (transitively).
+# - If it's some unrelated .css file sitting in the watch dir (e.g. a stale
+#   output, a leftover), do nothing — no noise.
 # ----------------------------------------------------------------------------
 compile_affected() {
     local changed="$1"
     local base; base=$(basename "$changed")
     if [[ "$base" =~ ^src\..*\.css$ ]]; then
         compile_css "$changed"
-        return
+        return 0
     fi
-    # Non-source change — could be a partial. Re-evaluate every source.
+
+    # Canonicalize so the path matches what resolve_deps emits
+    local changed_canonical
+    changed_canonical=$(cd "$(dirname "$changed")" 2>/dev/null && pwd)/$(basename "$changed")
+
+    # Find sources that import this file (directly or transitively)
+    local affected=""
     for css_file in "$WATCH_DIR"/src.*.css; do
         [ ! -f "$css_file" ] && continue
-        compile_css "$css_file"
+        if resolve_deps "$css_file" | grep -qxF "$changed_canonical"; then
+            affected="$affected $css_file"
+        fi
     done
+
+    # Nothing imports this file — ignore the event silently
+    [ -z "$affected" ] && return 1
+
+    for src in $affected; do
+        compile_css "$src"
+    done
+    return 0
 }
 
 # ----------------------------------------------------------------------------

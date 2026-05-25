@@ -6,8 +6,8 @@ A simple (but lightning-fast) build script that combines [Watchman](https://face
 
 Strike combines two best-in-class tools:
 
--   **[Watchman](https://facebook.github.io/watchman/)** - Facebook's file watching service that provides the fastest, most efficient file system monitoring available
--   **[Lightning CSS](https://lightningcss.dev/)** - An extremely fast CSS parser, transformer, bundler, and minifier written in Rust
+- **[Watchman](https://facebook.github.io/watchman/)** - Facebook's file watching service that provides the fastest, most efficient file system monitoring available
+- **[Lightning CSS](https://lightningcss.dev/)** - An extremely fast CSS parser, transformer, bundler, and minifier written in Rust
 
 While these tools are powerful on their own, they require configuration and setup. Strike wraps them in a zero-config script.
 
@@ -15,16 +15,16 @@ While these tools are powerful on their own, they require configuration and setu
 
 ### 🚀 Blazing Fast Performance
 
--   Near-instant compilation (typically 7-20ms)
--   Watchman's superior file watching eliminates polling overhead
--   Lightning CSS's Rust-based engine provides unmatched processing speed
+- Near-instant compilation (typically 7-20ms)
+- Watchman's superior file watching eliminates polling overhead
+- Lightning CSS's Rust-based engine provides unmatched processing speed
 
 ### 🎯 Smart Defaults
 
--   Automatically detects your main CSS file
--   Skips partial files (those starting with `_`)
--   Handles `@import` statements intelligently
--   Outputs to `[filename].compiled.css` to avoid conflicts
+- Automatically detects your main CSS file
+- Skips partial files (those starting with `_`)
+- Handles `@import` statements intelligently
+- Outputs to `[filename].compiled.css` to avoid conflicts
 
 ## Installation
 
@@ -108,8 +108,8 @@ However, for the best experience, I strongly recommend installing Watchman.
 
 In typical usage, Strike provides:
 
--   **File change detection**: < 20ms with Watchman
--   **CSS compilation**: 5-30ms for most projects
--   **Total response time**: Usually under 50ms from save to compiled output
+- **File change detection**: < 20ms with Watchman
+- **CSS compilation**: 5-30ms for most projects
+- **Total response time**: Usually under 50ms from save to compiled output
 
 This means you can save your CSS and see the compiled result faster than your browser can refresh.
