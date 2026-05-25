@@ -75,10 +75,10 @@ done
 # ----------------------------------------------------------------------------
 if [ "$SHOW_HELP" = true ]; then
     cat << 'EOF'
-swatch - Modern CSS Compiler (Lightning CSS)
+strike - Modern CSS Compiler (Lightning CSS)
 
 USAGE:
-    swatch [OPTIONS]
+    strike [OPTIONS]
 
 OPTIONS:
     -h, --help        Show this help message
@@ -91,21 +91,35 @@ OPTIONS:
     -d, --debug       Show debug information (commands being run)
 
 EXAMPLES:
-    swatch                    # Default: watch + minify, no source maps
-    swatch --no-watch         # Compile once and exit
-    swatch -s                 # Include source maps for debugging
-    swatch --no-minify -s     # Debug mode: readable + source maps
+    strike                    # Default: watch + minify, no source maps
+    strike --no-watch         # Compile once and exit
+    strike -s                 # Include source maps for debugging
+    strike --no-minify -s     # Debug mode: readable + source maps
 
 INPUT/OUTPUT:
     Compiles source files matching: src.*.css
     Example: src.theverge.com.css → theverge.com.css
 
+@IMPORTS:
+    @import statements are resolved recursively and bundled into the output.
+    Any .css file that's imported (partials, helpers, etc.) is watched too —
+    changing a partial recompiles every source that depends on it.
+
+CHANGE DETECTION:
+    A bundle hash (source + all transitive imports) is computed on every save.
+    If the hash matches the previous compile, the recompile is skipped — so
+    editors that re-save without content changes won't trigger needless work.
+
+ENV VARS:
+    BROWSER_TARGETS   Browserslist query for Lightning CSS targets
+                      (default: ">= 0.25%")
+
 NOTES:
-    - Only processes files matching the src.*.css pattern
-    - Partials (files starting with _) can be imported but aren't compiled directly
+    - Only files matching src.*.css are compiled as entry points
+    - Output filename strips the src. prefix (src.foo.css → foo.css)
     - Source maps are embedded inline when enabled (-s flag)
     - Default mode is optimized for production (minified, no maps)
-    - Uses Watchman for fastest possible file watching (if available)
+    - File watchers tried in order: watchman > fswatch > inotifywait > polling
 
 EOF
     exit 0
@@ -218,6 +232,69 @@ fi
 echo ""
 
 # ----------------------------------------------------------------------------
+# Import / Dependency Resolution
+# ----------------------------------------------------------------------------
+# Parses @import statements (both `@import "x";` and `@import url("x");` forms)
+# and emits one resolved absolute path per line. Used to build a bundle hash
+# so we can skip recompiles when nothing in the dependency graph has changed.
+
+extract_imports() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    # url(...) form
+    grep -hE "@import[[:space:]]+url\\(" "$file" 2>/dev/null | \
+        sed -E "s/.*@import[[:space:]]+url\\([[:space:]]*[\"']?//; s/[\"']?[[:space:]]*\\).*//"
+    # quoted form
+    grep -hE "@import[[:space:]]+[\"']" "$file" 2>/dev/null | \
+        sed -E "s/.*@import[[:space:]]+[\"']//; s/[\"'].*//"
+}
+
+# Recursively resolve all transitive imports for a source file.
+# Outputs sorted, deduplicated absolute paths (source file included).
+# Implemented with a tempfile seen-set for bash 3.2 compatibility.
+_resolve_deps_walk() {
+    local current="$1"
+    local seen="$2"
+    # Skip if already visited
+    grep -qxF "$current" "$seen" 2>/dev/null && return
+    echo "$current" >> "$seen"
+    local dir; dir=$(dirname "$current")
+    local imp resolved canonical
+    while IFS= read -r imp; do
+        [ -z "$imp" ] && continue
+        if [[ "$imp" == /* ]]; then
+            resolved="$imp"
+        else
+            resolved="$dir/$imp"
+        fi
+        # Canonicalize path so "../foo" and "foo" hash to the same dep
+        canonical=$(cd "$(dirname "$resolved")" 2>/dev/null && pwd)/$(basename "$resolved")
+        [ -f "$canonical" ] && _resolve_deps_walk "$canonical" "$seen"
+    done < <(extract_imports "$current")
+}
+
+resolve_deps() {
+    local seen
+    seen=$(mktemp) || return 1
+    _resolve_deps_walk "$1" "$seen"
+    sort -u "$seen"
+    rm -f "$seen"
+}
+
+# Hash the entire bundle (source + all transitive imports). Used to detect
+# whether anything that affects compilation output has actually changed.
+bundle_hash() {
+    local src="$1"
+    resolve_deps "$src" | xargs shasum -a 1 2>/dev/null | shasum -a 1 | awk '{print $1}'
+}
+
+# Path to the cached hash file for a given source.
+hash_file_for() {
+    [ -z "$HASH_DIR" ] && return 1
+    echo "$HASH_DIR/$(basename "$1").hash"
+}
+
+# ----------------------------------------------------------------------------
 # Core Compilation Function
 # ----------------------------------------------------------------------------
 compile_css() {
@@ -291,6 +368,23 @@ compile_css() {
     output_name="${base_name#src.}"           # Remove src. prefix
     output_file="$OUTPUT_DIR/${output_name}"
 
+    # Bundle-hash skip: if neither the source nor any of its transitive imports
+    # have changed since the last compile, do nothing. This avoids the
+    # "editor saved but content is identical" recompile loop.
+    if [ "$is_initial" = false ] && [ -n "$HASH_DIR" ]; then
+        local current_hash cached_hash hf
+        current_hash=$(bundle_hash "$main_file")
+        hf=$(hash_file_for "$main_file") || hf=""
+        if [ -n "$hf" ] && [ -f "$hf" ]; then
+            cached_hash=$(cat "$hf" 2>/dev/null)
+            if [ -n "$current_hash" ] && [ "$current_hash" = "$cached_hash" ]; then
+                echo -e "  ${GRAY}↘ ${WHITE}$base_name${GRAY} unchanged, skipped${RESET}"
+                COMPILING=false
+                return 0
+            fi
+        fi
+    fi
+
     # Build Lightning CSS command with options
     local cmd_args=()
 
@@ -326,6 +420,11 @@ compile_css() {
     local result=$?
 
     if [ $result -eq 0 ]; then
+        # Persist the bundle hash so future identical saves are skipped.
+        if [ -n "$HASH_DIR" ]; then
+            local hf_out
+            hf_out=$(hash_file_for "$main_file") && bundle_hash "$main_file" > "$hf_out"
+        fi
         # TIMEFORMAT gives us seconds with 3 decimal places (e.g., "0.023")
         # Convert to milliseconds by removing the decimal point
         if [[ "$timing_output" =~ ([0-9]+)\.([0-9]{3}) ]]; then
@@ -360,6 +459,27 @@ compile_css() {
 }
 
 # ----------------------------------------------------------------------------
+# Compile every source affected by a change.
+# - If the changed file is a src.*.css, compile only that one.
+# - Otherwise (a partial or imported helper), iterate all sources; the bundle
+#   hash check inside compile_css will fast-path the ones that don't depend
+#   on the changed file.
+# ----------------------------------------------------------------------------
+compile_affected() {
+    local changed="$1"
+    local base; base=$(basename "$changed")
+    if [[ "$base" =~ ^src\..*\.css$ ]]; then
+        compile_css "$changed"
+        return
+    fi
+    # Non-source change — could be a partial. Re-evaluate every source.
+    for css_file in "$WATCH_DIR"/src.*.css; do
+        [ ! -f "$css_file" ] && continue
+        compile_css "$css_file"
+    done
+}
+
+# ----------------------------------------------------------------------------
 # Output Directory Validation
 # ----------------------------------------------------------------------------
 if [ ! -d "$OUTPUT_DIR" ]; then
@@ -371,6 +491,10 @@ if [ ! -w "$OUTPUT_DIR" ]; then
     echo -e "${GRAY}Error: Output directory is not writable: $OUTPUT_DIR${RESET}" >&2
     exit 1
 fi
+
+# Content-hash cache: skip recompiles when an editor re-saves a file with no
+# byte changes (common with autosave / atomic-rename editors).
+HASH_DIR=$(mktemp -d -t strike-hashes.XXXXXX 2>/dev/null) || HASH_DIR=""
 
 # ----------------------------------------------------------------------------
 # Show Current Configuration
@@ -384,16 +508,18 @@ echo ""
 # ----------------------------------------------------------------------------
 # Initial Compilation - Compile all source CSS files
 # ----------------------------------------------------------------------------
+# Run initial compiles in parallel — each lightningcss invocation is independent
+# (different output paths, distinct HASH_DIR entries) so there's no shared state
+# to contend over. Output order will follow completion order, not glob order.
 for css_file in "$WATCH_DIR"/src.*.css; do
     [ ! -f "$css_file" ] && continue
-
     base_name=$(basename "$css_file")
-
     # Skip partials (start with _)
     if [[ ! "$base_name" =~ ^_ ]]; then
-        compile_css "$css_file" initial
+        compile_css "$css_file" initial &
     fi
 done
+wait
 
 # Exit if not in watch mode
 if [ "$WATCH_MODE" = false ]; then
@@ -410,11 +536,20 @@ cleanup() {
     if command -v watchman &>/dev/null; then
         watchman watch-del "$WATCH_DIR" >/dev/null 2>&1
     fi
+    # Remove the per-session hash cache
+    [ -n "$HASH_DIR" ] && [ -d "$HASH_DIR" ] && rm -rf "$HASH_DIR"
     exit 0
 }
 
 # Set up signal handlers for all watch modes
 trap cleanup INT TERM HUP QUIT
+
+# When the same file is saved repeatedly, collapse the previous 2-line block
+# (saved + compile result) in place instead of scrolling the terminal.
+# No-op when stdout isn't a TTY (piped output, etc.).
+overwrite_prev_block() {
+    [ -t 1 ] && printf '\033[2A\033[J'
+}
 
 # ----------------------------------------------------------------------------
 # File Watching Setup
@@ -443,33 +578,31 @@ if command -v watchman &>/dev/null; then
         WATCHMAN_FAILED=false
     fi
 
-    # Only proceed with watchman if initialization succeeded
+    # Watch for changes using watchman-wait if setup succeeded.
+    # Watches ALL .css files so @import partials trigger rebuilds too.
+    # Outer `while true` restarts watchman-wait if the stream dies.
     if [ "$WATCHMAN_FAILED" = false ]; then
-        # Set up optimized subscription for source CSS files (src.*.css)
-        # Settle time of 20ms for near-instant response (default is 200ms)
-        if ! watchman -j <<-EOF > /dev/null 2>&1
-            ["subscribe", "$WATCH_DIR", "css-watch", {
-                "expression": ["match", "src.*.css"],
-                "fields": ["name"],
-                "settle": 20
-            }]
-EOF
-        then
-            echo -e "${GRAY}Warning: Watchman subscription failed${RESET}"
-            echo -e "${GRAY}Falling back to alternative file watcher...${RESET}"
-            WATCHMAN_FAILED=true
-        fi
-    fi
-
-    # Watch for changes using watchman-wait if setup succeeded
-    if [ "$WATCHMAN_FAILED" = false ]; then
+        # Use process substitution (not a pipe) so the while-read loop runs in
+        # the main shell. This keeps $LAST_FILE alive across watchman-wait
+        # restarts — watchman-wait exits after each event by default, so the
+        # subshell trick wouldn't persist state between events.
+        LAST_FILE=""
         while true; do
-        watchman-wait "$WATCH_DIR" --max-events=1 --fields name -p 'src.*.css' 2>/dev/null | while read -r file; do
-            # Get current time
-            current_time=$(date +"%H:%M")
-            echo -e "${WHITE}$file${GRAY} changed (${current_time})${RESET}"
-            compile_css "$file"
-        done
+            while read -r file; do
+                if [ "$file" = "$LAST_FILE" ]; then
+                    overwrite_prev_block
+                fi
+                current_time=$(date +"%H:%M")
+                echo -e "${WHITE}$file${GRAY} saved (${current_time})${RESET}"
+                compile_affected "$file"
+                if [[ "$(basename "$file")" =~ ^src\..*\.css$ ]]; then
+                    LAST_FILE="$file"
+                else
+                    LAST_FILE=""
+                fi
+            done < <(watchman-wait "$WATCH_DIR" --fields name -p '*.css' 2>/dev/null)
+            # watchman-wait exits per event by default; brief pause before reconnect
+            sleep 0.1
         done
     fi
 fi
@@ -481,16 +614,25 @@ if (! command -v watchman &>/dev/null || [ "$WATCHMAN_FAILED" = true ]) && comma
     echo -e "${GRAY}• Press Ctrl+C to stop watching${RESET}"
     echo ""
 
-    # Watch source CSS files (src.*.css)
+    # Watch all .css files (sources and partials)
     fswatch \
-        --include 'src\..*\.css$' \
-        "$WATCH_DIR" 2>/dev/null | \
-    while read -r path; do
-        # Get current time
-        current_time=$(date +"%H:%M")
-        echo -e "${WHITE}$(basename "$path")${GRAY} changed (${current_time})${RESET}"
-        compile_css "$path"
-    done
+        --include '\.css$' \
+        "$WATCH_DIR" 2>/dev/null | (
+        LAST_FILE=""
+        while read -r path; do
+            if [ "$path" = "$LAST_FILE" ]; then
+                overwrite_prev_block
+            fi
+            current_time=$(date +"%H:%M")
+            echo -e "${WHITE}$(basename "$path")${GRAY} saved (${current_time})${RESET}"
+            compile_affected "$path"
+            if [[ "$(basename "$path")" =~ ^src\..*\.css$ ]]; then
+                LAST_FILE="$path"
+            else
+                LAST_FILE=""
+            fi
+        done
+    )
 
 # Option 3: inotifywait (Linux, good performance)
 # Only use if watchman and fswatch are not available or failed
@@ -499,18 +641,26 @@ elif (! command -v watchman &>/dev/null || [ "$WATCHMAN_FAILED" = true ]) && com
     echo -e "${GRAY}• Press Ctrl+C to stop watching${RESET}"
     echo ""
 
+    LAST_FILE=""
     while true; do
-        # Wait for source CSS file changes (src.*.css)
+        # Wait for any .css file change (sources and partials)
         file=$(inotifywait -q -e modify,create,delete,move \
-            --include 'src\..*\.css$' \
+            --include '\.css$' \
             --format '%f' \
             "$WATCH_DIR" 2>/dev/null)
 
         if [[ -n "$file" ]]; then
-            # Get current time
+            if [ "$file" = "$LAST_FILE" ]; then
+                overwrite_prev_block
+            fi
             current_time=$(date +"%H:%M")
-            echo -e "${WHITE}$file${GRAY} changed (${current_time})${RESET}"
-            compile_css "$file"
+            echo -e "${WHITE}$file${GRAY} saved (${current_time})${RESET}"
+            compile_affected "$file"
+            if [[ "$file" =~ ^src\..*\.css$ ]]; then
+                LAST_FILE="$file"
+            else
+                LAST_FILE=""
+            fi
         fi
     done
 
@@ -524,46 +674,50 @@ else
     echo -e "${GRAY}• Press Ctrl+C to stop watching${RESET}"
     echo ""
 
-    # Track file modification times
-    declare -A file_times
+    # Polling requires bash 4+ for associative arrays. macOS ships bash 3.2
+    # by default, so guard with a clear error rather than failing cryptically.
+    if ! declare -A _strike_assoc_test 2>/dev/null; then
+        echo -e "${GRAY}Error: polling fallback requires bash 4+ (or install watchman/fswatch)${RESET}" >&2
+        exit 1
+    fi
+    unset _strike_assoc_test
 
-    # Get initial state for source CSS files
-    for file in "$WATCH_DIR"/src.*.css; do
-        [ -f "$file" ] || continue
-
-        # Store modification time (portable across macOS and Linux)
+    stat_mtime() {
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            file_times["$file"]=$(stat -f "%m" "$file" 2>/dev/null)
+            stat -f "%m" "$1" 2>/dev/null
         else
-            file_times["$file"]=$(stat -c "%Y" "$file" 2>/dev/null)
+            stat -c "%Y" "$1" 2>/dev/null
         fi
+    }
+
+    # Track mtimes for all .css files (sources AND partials, so @imports work)
+    declare -A file_times
+    for file in "$WATCH_DIR"/*.css; do
+        [ -f "$file" ] || continue
+        file_times["$file"]=$(stat_mtime "$file")
     done
 
     # Poll for changes every second
+    LAST_FILE=""
     while true; do
-        for file in "$WATCH_DIR"/src.*.css; do
+        for file in "$WATCH_DIR"/*.css; do
             [ -f "$file" ] || continue
-
-            # Get current modification time
-            current_time=""
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-                current_time=$(stat -f "%m" "$file" 2>/dev/null)
-            else
-                current_time=$(stat -c "%Y" "$file" 2>/dev/null)
-            fi
-
-            # Check if file changed
-            if [ "${file_times[$file]}" != "$current_time" ]; then
-                file_times["$file"]=$current_time
-                # Get current time
+            current_mtime=$(stat_mtime "$file")
+            if [ "${file_times[$file]:-}" != "$current_mtime" ]; then
+                file_times["$file"]=$current_mtime
+                if [ "$file" = "$LAST_FILE" ]; then
+                    overwrite_prev_block
+                fi
                 time_now=$(date +"%H:%M")
-                echo -e "${WHITE}$(basename "$file")${GRAY} changed (${time_now})${RESET}"
-                # Compile the specific file that changed
-                compile_css "$file"
+                echo -e "${WHITE}$(basename "$file")${GRAY} saved (${time_now})${RESET}"
+                compile_affected "$file"
+                if [[ "$(basename "$file")" =~ ^src\..*\.css$ ]]; then
+                    LAST_FILE="$file"
+                else
+                    LAST_FILE=""
+                fi
             fi
         done
-
-        # Wait before next check
         sleep 1
     done
 fi
